@@ -4,14 +4,14 @@ A production-ready AI agent that provides intelligent routing and directions thr
 
 ## Features
 
-- 🗺️ Real-time route calculation between any two locations
-- 📍 Smart location geocoding and validation
-- ⚡ Async/await architecture for optimal performance
-- 🔄 Automatic retry logic with exponential backoff
-- ✅ Comprehensive input validation and error handling
-- 📊 Structured logging for monitoring
-- 🐳 Docker support for easy deployment
-- 🧪 Full test coverage
+-  Real-time route calculation between any two locations
+-  Smart location geocoding and validation
+-  Async/await architecture for optimal performance
+-  Automatic retry logic with exponential backoff
+-  Comprehensive input validation and error handling
+-  Structured logging for monitoring
+-  Docker support for easy deployment
+-  Full test coverage
 
 ## Architecture
 ```
