@@ -42,7 +42,12 @@ class MapRouteAgent:
             return self._create_parse_error_response()
         
         origin_name, dest_name = locations
-        
+
+        # --- DEBUG LOGS FOR PARSED ORIGIN/DESTINATION ---
+        logger.debug(f"Parsed origin: '{origin_name}'")
+        logger.debug(f"Parsed destination: '{dest_name}'")
+        # -----------------------------------------------
+
         # Validate locations
         origin_valid, origin_error = LocationValidator.validate_location(origin_name)
         dest_valid, dest_error = LocationValidator.validate_location(dest_name)
