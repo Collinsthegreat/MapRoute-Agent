@@ -1,7 +1,7 @@
 """Webhook endpoint handlers for Telex.im integration."""
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from typing import Dict, Any, Optional
+from typing import Optional, List
 from pydantic import BaseModel
 from services.agent_service import MapRouteAgent
 from utils.logger import setup_logger
@@ -18,6 +18,42 @@ class SimpleTelexMessage(BaseModel):
     channel_id: Optional[str] = None
 
 
+def latest_text(parts: Optional[List[dict]]) -> str:
+    """
+    Extract the last valid text from A2A message parts.
+    Skips HTML, status messages, empty parts, and nested data.
+    Added debug logs for tracing exactly what gets selected.
+    """
+    if not parts:
+        logger.debug("No message parts received")
+        return ""
+    
+    for i, p in enumerate(reversed(parts)):
+        if not isinstance(p, dict):
+            logger.debug(f"Skipping non-dict part at reversed index {i}")
+            continue
+        kind = p.get("kind")
+        text = p.get("text", "")
+        if not text or not text.strip():
+            continue
+        # Skip HTML or status messages
+        if text.startswith("<") or "Calculating" in text or "..." in text:
+            continue
+        if kind == "text":
+            logger.debug(f"Selected text part {i}: '{text.strip()[:50]}'")
+            return text.strip()
+        # Handle nested data parts
+        if kind == "data" and isinstance(p.get("data"), list):
+            for j, item in enumerate(reversed(p["data"])):
+                if isinstance(item, dict):
+                    nested_text = item.get("text", "")
+                    if nested_text and not nested_text.startswith("<") and "Calculating" not in nested_text:
+                        logger.debug(f"Selected nested data text part {i}.{j}: '{nested_text[:50]}'")
+                        return nested_text.strip()
+    logger.debug("No valid text found in message parts")
+    return ""
+
+
 @router.post("/webhook")
 async def handle_webhook(request: Request):
     """
@@ -26,53 +62,19 @@ async def handle_webhook(request: Request):
     """
     try:
         body = await request.json()
-        logger.info(f"Received webhook request")
-        
+        logger.info("Received webhook request")
+
         message_text = None
-        
+
         # Check if it's A2A protocol (JSON-RPC 2.0)
-        if "jsonrpc" in body and body.get("jsonrpc") == "2.0":
-            logger.info("Detected A2A protocol request")
-            
-            # Extract message from A2A format
+        if body.get("jsonrpc") == "2.0":
+            logger.debug("Detected A2A protocol request")
             params = body.get("params", {})
             message_obj = params.get("message", {})
             parts = message_obj.get("parts", [])
-            
-            logger.info(f"Found {len(parts)} parts in message")
-            
-            # Get text from parts - ONLY take the FIRST clean text part
-            for i, part in enumerate(parts):
-                part_kind = part.get("kind") or part.get("type")
-                part_text = part.get("text", "")
-                
-                logger.info(f"Part {i}: kind={part_kind}, text_preview={part_text[:50] if part_text else 'empty'}")
-                
-                # Skip empty parts
-                if not part_text or not part_text.strip():
-                    continue
-                
-                # Skip HTML content
-                if part_text.startswith("<p>") or part_text.startswith("<"):
-                    logger.info(f"Skipping HTML part {i}")
-                    continue
-                
-                # Skip status messages
-                if "Calculating" in part_text or "..." in part_text:
-                    logger.info(f"Skipping status message part {i}")
-                    continue
-                
-                # Skip data kind (it's nested content)
-                if part_kind == "data":
-                    logger.info(f"Skipping data part {i}")
-                    continue
-                
-                # Take ONLY the first valid text
-                if part_kind == "text" and part_text.strip():
-                    message_text = part_text.strip()
-                    logger.info(f"✓ Extracted clean text from part {i}: '{message_text}'")
-                    break  # STOP after first valid text
-            
+
+            message_text = latest_text(parts)
+
             if not message_text:
                 logger.error("No valid text found in A2A message parts")
                 return JSONResponse(
@@ -86,11 +88,10 @@ async def handle_webhook(request: Request):
                     },
                     status_code=400
                 )
-            
-            # Process message
-            logger.info(f"Processing message: '{message_text}'")
+
+            logger.info(f"Processing message sent to agent: '{message_text}'")
             response = await agent.process_message(message_text)
-            
+
             # Return A2A format response
             a2a_response = {
                 "jsonrpc": "2.0",
@@ -100,16 +101,13 @@ async def handle_webhook(request: Request):
                         "kind": "message",
                         "role": "agent",
                         "parts": [
-                            {
-                                "kind": "text",
-                                "text": response.text
-                            }
+                            {"kind": "text", "text": response.text}
                         ],
                         "messageId": f"{message_obj.get('messageId', 'msg')}_response"
                     }
                 }
             }
-            
+
             # Add map link if available
             if response.attachments:
                 for attachment in response.attachments:
@@ -121,19 +119,15 @@ async def handle_webhook(request: Request):
                             "title": attachment.get("title", "View Map")
                         }
                     })
-            
-            logger.info(f"Sending A2A response with {len(a2a_response['result']['message']['parts'])} parts")
+
+            logger.debug(f"Sending A2A response with {len(a2a_response['result']['message']['parts'])} parts")
             return JSONResponse(content=a2a_response)
-        
+
         # Simple format: {"message": "..."}
         else:
-            logger.info("Detected simple message format")
-            
-            if "message" in body:
-                message_text = body["message"]
-            elif "text" in body:
-                message_text = body["text"]
-            else:
+            logger.debug("Detected simple message format")
+            message_text = body.get("message") or body.get("text")
+            if not message_text:
                 return JSONResponse(
                     content={
                         "text": "❌ No message field found. Please send a 'message' field.",
@@ -141,35 +135,27 @@ async def handle_webhook(request: Request):
                     },
                     status_code=400
                 )
-            
-            # Process message
-            logger.info(f"Processing simple message: '{message_text}'")
+
+            logger.info(f"Processing simple message sent to agent: '{message_text}'")
             response = await agent.process_message(message_text)
-            
-            # Simple response
+
             response_data = {
                 "text": response.text,
                 "success": True
             }
-            
             if response.attachments:
                 response_data["attachments"] = response.attachments
-            
             if response.quick_replies:
                 response_data["quick_replies"] = response.quick_replies
-            
             if response.metadata:
                 response_data["metadata"] = response.metadata
-            
-            logger.info(f"Sending simple response")
+
+            logger.debug("Sending simple response")
             return JSONResponse(content=response_data)
-        
+
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        
-        # Determine if A2A format
         is_a2a = isinstance(body, dict) and "jsonrpc" in body
-        
         if is_a2a:
             return JSONResponse(
                 content={
