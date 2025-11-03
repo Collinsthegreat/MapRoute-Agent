@@ -20,7 +20,7 @@ class SimpleTelexMessage(BaseModel):
 
 def latest_text(parts: Optional[List[dict]]) -> str:
     """
-    Extract the last valid text from A2A message parts.
+    Extract the last valid text from message parts.
     Skips HTML, status messages, empty parts, and nested data.
     """
     if not parts:
@@ -55,13 +55,30 @@ def extract_last_directions(text: str) -> str:
     """
     Extract only the last 'directions from ...' query from a concatenated string.
     """
-    if "directions from" in text:
+    if isinstance(text, str) and "directions from" in text:
         parts = text.split("directions from")
         if len(parts) > 1:
             last_text = "directions from" + parts[-1].strip()
             logger.debug(f"Extracted last directions query: '{last_text[:100]}'")
             return last_text
-    return text.strip()
+    if isinstance(text, str):
+        return text.strip()
+    return ""  # safe fallback
+
+
+def format_telex_error(error_message: str, code: int = -32603, id_value: Optional[str] = None, data: Optional[str] = None):
+    """Return standardized Telex-style JSON-RPC error response."""
+    error_response = {
+        "jsonrpc": "2.0",
+        "id": id_value,
+        "error": {
+            "code": code,
+            "message": error_message
+        }
+    }
+    if data:
+        error_response["error"]["data"] = data
+    return JSONResponse(content=error_response, status_code=500 if code == -32603 else 400)
 
 
 @router.post("/webhook")
@@ -88,16 +105,10 @@ async def handle_webhook(request: Request):
 
             if not message_text:
                 logger.error("No valid text found in A2A message parts")
-                return JSONResponse(
-                    content={
-                        "jsonrpc": "2.0",
-                        "id": body.get("id"),
-                        "error": {
-                            "code": -32602,
-                            "message": "No valid text content in message parts"
-                        }
-                    },
-                    status_code=400
+                return format_telex_error(
+                    "No valid text content in message parts",
+                    code=-32602,
+                    id_value=body.get("id")
                 )
 
             logger.info(f"Processing message sent to agent: '{message_text}'")
@@ -130,10 +141,16 @@ async def handle_webhook(request: Request):
             logger.debug(f"Sending A2A response with {len(a2a_response['result']['message']['parts'])} parts")
             return JSONResponse(content=a2a_response)
 
-        # Simple format: {"message": "..." }
+        # Simple format: {"message": "..." } OR {"message": {...}}
         else:
             logger.debug("Detected simple message format")
-            message_text = body.get("message") or body.get("text")
+            message_obj = body.get("message") or body.get("text")
+
+            if isinstance(message_obj, dict) and "parts" in message_obj:
+                message_text = latest_text(message_obj.get("parts"))
+            else:
+                message_text = message_obj
+
             message_text = extract_last_directions(message_text)
 
             if not message_text:
@@ -161,20 +178,14 @@ async def handle_webhook(request: Request):
 
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
         is_a2a = isinstance(body, dict) and "jsonrpc" in body
         if is_a2a:
-            return JSONResponse(
-                content={
-                    "jsonrpc": "2.0",
-                    "id": body.get("id"),
-                    "error": {
-                        "code": -32603,
-                        "message": "Internal server error",
-                        "data": str(e)
-                    }
-                },
-                status_code=500
-            )
+            return format_telex_error("Internal server error", data=str(e), id_value=body.get("id"))
         else:
             return JSONResponse(
                 content={
@@ -195,3 +206,32 @@ async def health_check():
         "version": "1.0.0",
         "protocol": "A2A + Simple REST"
     }
+
+
+@router.get("/manifest")
+async def manifest():
+    """
+    Manifest endpoint required by Telex to fetch your agent's metadata.
+    """
+    return JSONResponse(
+        content={
+            "name": "MapRoute Agent",
+            "description": "An intelligent travel assistant that provides directions, distances, and estimated times between locations using AI and mapping APIs.",
+            "version": "1.0.0",
+            "homepage_url": "https://maproute-agent-production.up.railway.app",
+            "author": {
+                "name": "Abuchi Nwajagu Collins",
+                "email": "collinsthegreat@gmail.com"
+            },
+            "capabilities": {
+                "a2a": True,
+                "interactive": True,
+                "text": True,
+                "links": True
+            },
+            "endpoints": {
+                "webhook": "https://maproute-agent-production.up.railway.app/webhook"
+            },
+            "tags": ["travel", "navigation", "AI agent", "maps", "directions"]
+        }
+    )

@@ -22,21 +22,22 @@ class MessageParser:
     def parse_route_request(cls, message: str) -> Optional[Tuple[str, str]]:
         """
         Parse a route request message to extract origin and destination.
-        
-        Args:
-            message: User message text
-            
-        Returns:
-            Tuple of (origin, destination) or None if parsing fails
         """
+        if not message:
+            return None
+
+        # ✅ NEW: Normalize text and fix missing spacing (e.g., "fromParis" → "from Paris")
+        message = re.sub(r"\s+", " ", message.strip())             # normalize whitespace
+        message = re.sub(r"([a-z])([A-Z])", r"\1 \2", message)    # fix camel-like joins
+        message = re.sub(r"from([A-Z])", r"from \1", message, flags=re.IGNORECASE)
         message = message.lower().strip()
-        
+
         for pattern in cls.DIRECTION_PATTERNS:
             match = re.search(pattern, message, re.IGNORECASE)
             if match:
-                origin = match.group(1).strip()
-                destination = match.group(2).strip()
-                
+                origin = match.group(1).strip().title()
+                destination = match.group(2).strip().title()
+
                 logger.info(f"Parsed request: {origin} -> {destination}")
                 return origin, destination
         
@@ -47,13 +48,10 @@ class MessageParser:
     def is_route_request(cls, message: str) -> bool:
         """
         Check if message is a route request.
-        
-        Args:
-            message: User message text
-            
-        Returns:
-            True if message appears to be a route request
         """
+        if not message:
+            return False
+
         keywords = ['direction', 'route', 'navigate', 'from', 'to', 'how to get']
         message_lower = message.lower()
         
