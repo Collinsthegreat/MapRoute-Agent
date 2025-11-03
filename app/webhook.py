@@ -22,7 +22,6 @@ def latest_text(parts: Optional[List[dict]]) -> str:
     """
     Extract the last valid text from A2A message parts.
     Skips HTML, status messages, empty parts, and nested data.
-    Added debug logs for tracing exactly what gets selected.
     """
     if not parts:
         logger.debug("No message parts received")
@@ -36,13 +35,11 @@ def latest_text(parts: Optional[List[dict]]) -> str:
         text = p.get("text", "")
         if not text or not text.strip():
             continue
-        # Skip HTML or status messages
         if text.startswith("<") or "Calculating" in text or "..." in text:
             continue
         if kind == "text":
             logger.debug(f"Selected text part {i}: '{text.strip()[:50]}'")
             return text.strip()
-        # Handle nested data parts
         if kind == "data" and isinstance(p.get("data"), list):
             for j, item in enumerate(reversed(p["data"])):
                 if isinstance(item, dict):
@@ -52,6 +49,19 @@ def latest_text(parts: Optional[List[dict]]) -> str:
                         return nested_text.strip()
     logger.debug("No valid text found in message parts")
     return ""
+
+
+def extract_last_directions(text: str) -> str:
+    """
+    Extract only the last 'directions from ...' query from a concatenated string.
+    """
+    if "directions from" in text:
+        parts = text.split("directions from")
+        if len(parts) > 1:
+            last_text = "directions from" + parts[-1].strip()
+            logger.debug(f"Extracted last directions query: '{last_text[:100]}'")
+            return last_text
+    return text.strip()
 
 
 @router.post("/webhook")
@@ -74,6 +84,7 @@ async def handle_webhook(request: Request):
             parts = message_obj.get("parts", [])
 
             message_text = latest_text(parts)
+            message_text = extract_last_directions(message_text)
 
             if not message_text:
                 logger.error("No valid text found in A2A message parts")
@@ -92,7 +103,6 @@ async def handle_webhook(request: Request):
             logger.info(f"Processing message sent to agent: '{message_text}'")
             response = await agent.process_message(message_text)
 
-            # Return A2A format response
             a2a_response = {
                 "jsonrpc": "2.0",
                 "id": body.get("id"),
@@ -100,15 +110,12 @@ async def handle_webhook(request: Request):
                     "message": {
                         "kind": "message",
                         "role": "agent",
-                        "parts": [
-                            {"kind": "text", "text": response.text}
-                        ],
+                        "parts": [{"kind": "text", "text": response.text}],
                         "messageId": f"{message_obj.get('messageId', 'msg')}_response"
                     }
                 }
             }
 
-            # Add map link if available
             if response.attachments:
                 for attachment in response.attachments:
                     a2a_response["result"]["message"]["parts"].append({
@@ -123,10 +130,12 @@ async def handle_webhook(request: Request):
             logger.debug(f"Sending A2A response with {len(a2a_response['result']['message']['parts'])} parts")
             return JSONResponse(content=a2a_response)
 
-        # Simple format: {"message": "..."}
+        # Simple format: {"message": "..." }
         else:
             logger.debug("Detected simple message format")
             message_text = body.get("message") or body.get("text")
+            message_text = extract_last_directions(message_text)
+
             if not message_text:
                 return JSONResponse(
                     content={
@@ -139,10 +148,7 @@ async def handle_webhook(request: Request):
             logger.info(f"Processing simple message sent to agent: '{message_text}'")
             response = await agent.process_message(message_text)
 
-            response_data = {
-                "text": response.text,
-                "success": True
-            }
+            response_data = {"text": response.text, "success": True}
             if response.attachments:
                 response_data["attachments"] = response.attachments
             if response.quick_replies:
