@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Copy .env
-COPY .env .env
+#COPY .env .env
 
 
 # Create non-root user
