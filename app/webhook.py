@@ -1,5 +1,5 @@
 """Webhook endpoint handlers for Telex.im integration."""
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional
 from pydantic import BaseModel
@@ -26,7 +26,7 @@ async def handle_webhook(request: Request):
     """
     try:
         body = await request.json()
-        logger.info(f"Received webhook: {body}")
+        logger.info(f"Received webhook request")
         
         message_text = None
         
@@ -39,28 +39,56 @@ async def handle_webhook(request: Request):
             message_obj = params.get("message", {})
             parts = message_obj.get("parts", [])
             
-            # Get text from parts
-            for part in parts:
-                if part.get("kind") == "text" or part.get("type") == "text":
-                    message_text = part.get("text", "")
-                    if message_text:
-                        break
+            logger.info(f"Found {len(parts)} parts in message")
+            
+            # Get text from parts - ONLY take the FIRST clean text part
+            for i, part in enumerate(parts):
+                part_kind = part.get("kind") or part.get("type")
+                part_text = part.get("text", "")
+                
+                logger.info(f"Part {i}: kind={part_kind}, text_preview={part_text[:50] if part_text else 'empty'}")
+                
+                # Skip empty parts
+                if not part_text or not part_text.strip():
+                    continue
+                
+                # Skip HTML content
+                if part_text.startswith("<p>") or part_text.startswith("<"):
+                    logger.info(f"Skipping HTML part {i}")
+                    continue
+                
+                # Skip status messages
+                if "Calculating" in part_text or "..." in part_text:
+                    logger.info(f"Skipping status message part {i}")
+                    continue
+                
+                # Skip data kind (it's nested content)
+                if part_kind == "data":
+                    logger.info(f"Skipping data part {i}")
+                    continue
+                
+                # Take ONLY the first valid text
+                if part_kind == "text" and part_text.strip():
+                    message_text = part_text.strip()
+                    logger.info(f"✓ Extracted clean text from part {i}: '{message_text}'")
+                    break  # STOP after first valid text
             
             if not message_text:
-                logger.error("No text found in A2A message parts")
+                logger.error("No valid text found in A2A message parts")
                 return JSONResponse(
                     content={
                         "jsonrpc": "2.0",
                         "id": body.get("id"),
                         "error": {
                             "code": -32602,
-                            "message": "No text content in message parts"
+                            "message": "No valid text content in message parts"
                         }
                     },
                     status_code=400
                 )
             
             # Process message
+            logger.info(f"Processing message: '{message_text}'")
             response = await agent.process_message(message_text)
             
             # Return A2A format response
@@ -94,7 +122,7 @@ async def handle_webhook(request: Request):
                         }
                     })
             
-            logger.info(f"Sending A2A response: {a2a_response}")
+            logger.info(f"Sending A2A response with {len(a2a_response['result']['message']['parts'])} parts")
             return JSONResponse(content=a2a_response)
         
         # Simple format: {"message": "..."}
@@ -115,6 +143,7 @@ async def handle_webhook(request: Request):
                 )
             
             # Process message
+            logger.info(f"Processing simple message: '{message_text}'")
             response = await agent.process_message(message_text)
             
             # Simple response
@@ -132,14 +161,16 @@ async def handle_webhook(request: Request):
             if response.metadata:
                 response_data["metadata"] = response.metadata
             
-            logger.info(f"Sending simple response: {response_data}")
+            logger.info(f"Sending simple response")
             return JSONResponse(content=response_data)
         
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
         
-        # Return appropriate error format
-        if "jsonrpc" in body:
+        # Determine if A2A format
+        is_a2a = isinstance(body, dict) and "jsonrpc" in body
+        
+        if is_a2a:
             return JSONResponse(
                 content={
                     "jsonrpc": "2.0",
@@ -169,5 +200,6 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "MapRoute AI Agent",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "protocol": "A2A + Simple REST"
     }
