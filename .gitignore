@@ -42,3 +42,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Ignore local Thanos test script
+thanos_test.py

@@ -5,6 +5,8 @@ from typing import Optional, List
 from pydantic import BaseModel
 from services.agent_service import MapRouteAgent
 from utils.logger import setup_logger
+from datetime import datetime, timezone
+import uuid
 
 logger = setup_logger(__name__)
 router = APIRouter()
@@ -41,7 +43,7 @@ def latest_text(parts: Optional[List[dict]]) -> str:
             logger.debug(f"Selected text part {i}: '{text.strip()[:50]}'")
             return text.strip()
         if kind == "data" and isinstance(p.get("data"), list):
-            for j, item in enumerate(reversed(p["data"])):
+            for j, item in enumerate(reversed(p["data"])): 
                 if isinstance(item, dict):
                     nested_text = item.get("text", "")
                     if nested_text and not nested_text.startswith("<") and "Calculating" not in nested_text:
@@ -66,19 +68,72 @@ def extract_last_directions(text: str) -> str:
     return ""  # safe fallback
 
 
-def format_telex_error(error_message: str, code: int = -32603, id_value: Optional[str] = None, data: Optional[str] = None):
-    """Return standardized Telex-style JSON-RPC error response."""
-    error_response = {
-        "jsonrpc": "2.0",
-        "id": id_value,
-        "error": {
-            "code": code,
-            "message": error_message
-        }
+def make_task_result(
+    rid: any,
+    *,
+    content: str,
+    context_id: str,
+    task_id: str,
+    state: str = "completed",
+    user_echo: str | None = None,
+    attachments: Optional[List[dict]] = None,
+    quick_replies: Optional[List[dict]] = None,
+    artifact_name: str = "assistantResponse"
+):
+    """Return MapRoute-style task envelope, always HTTP 200 safe."""
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    result = {
+        "id": task_id,
+        "contextId": context_id,
+        "status": {
+            "state": state,
+            "timestamp": now,
+            "message": {
+                "kind": "message",
+                "role": "agent",
+                "parts": [{"kind": "text", "text": content}],
+                "messageId": str(uuid.uuid4()),
+                "taskId": None,
+                "metadata": None,
+            },
+        },
+        "artifacts": [
+            {
+                "artifactId": str(uuid.uuid4()),
+                "name": artifact_name,
+                "parts": [{"kind": "text", "text": content}],
+            }
+        ],
+        "history": [],
+        "kind": "task",
     }
-    if data:
-        error_response["error"]["data"] = data
-    return JSONResponse(content=error_response, status_code=500 if code == -32603 else 400)
+
+    if attachments:
+        result["status"]["message"]["attachments"] = attachments
+        result["artifacts"].append({
+            "artifactId": str(uuid.uuid4()),
+            "name": "attachments",
+            "parts": [{"kind": "data", "data": attachments}]
+        })
+
+    if quick_replies:
+        result["status"]["message"]["quick_replies"] = quick_replies
+        result["artifacts"].append({
+            "artifactId": str(uuid.uuid4()),
+            "name": "quickReplies",
+            "parts": [{"kind": "data", "data": quick_replies}]
+        })
+
+    if user_echo is not None:
+        result["history"].append({
+            "kind": "message",
+            "role": "user",
+            "parts": [{"kind": "text", "text": user_echo}],
+            "messageId": str(uuid.uuid4()),
+            "taskId": None,
+            "metadata": None,
+        })
+    return {"jsonrpc": "2.0", "id": rid, "result": result}
 
 
 @router.post("/webhook")
@@ -86,66 +141,48 @@ async def handle_webhook(request: Request):
     """
     Handle incoming webhook requests from Telex.im.
     Supports both simple JSON and A2A protocol formats.
+    Returns MapRoute A2A-compliant responses always.
     """
     try:
         body = await request.json()
         logger.info("Received webhook request")
+        rid = body.get("id", str(uuid.uuid4()))
+        message_text = ""
 
-        message_text = None
-
-        # Check if it's A2A protocol (JSON-RPC 2.0)
         if body.get("jsonrpc") == "2.0":
-            logger.debug("Detected A2A protocol request")
+            # --- A2A protocol ---
             params = body.get("params", {})
             message_obj = params.get("message", {})
             parts = message_obj.get("parts", [])
-
             message_text = latest_text(parts)
             message_text = extract_last_directions(message_text)
 
             if not message_text:
-                logger.error("No valid text found in A2A message parts")
-                return format_telex_error(
-                    "No valid text content in message parts",
-                    code=-32602,
-                    id_value=body.get("id")
+                resp = make_task_result(
+                    rid,
+                    content="❌ No valid text found in A2A message parts.",
+                    context_id=str(uuid.uuid4()),
+                    task_id=str(uuid.uuid4()),
+                    state="failed",
+                    user_echo=None
                 )
+                return JSONResponse(content=resp)
 
-            logger.info(f"Processing message sent to agent: '{message_text}'")
             response = await agent.process_message(message_text)
+            resp = make_task_result(
+                rid,
+                content=response.text,
+                context_id=str(uuid.uuid4()),
+                task_id=str(uuid.uuid4()),
+                user_echo=message_text,
+                attachments=getattr(response, "attachments", None),
+                quick_replies=getattr(response, "quick_replies", None)
+            )
+            return JSONResponse(content=resp)
 
-            a2a_response = {
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "result": {
-                    "message": {
-                        "kind": "message",
-                        "role": "agent",
-                        "parts": [{"kind": "text", "text": response.text}],
-                        "messageId": f"{message_obj.get('messageId', 'msg')}_response"
-                    }
-                }
-            }
-
-            if response.attachments:
-                for attachment in response.attachments:
-                    a2a_response["result"]["message"]["parts"].append({
-                        "kind": "data",
-                        "data": {
-                            "type": "link",
-                            "url": attachment.get("url"),
-                            "title": attachment.get("title", "View Map")
-                        }
-                    })
-
-            logger.debug(f"Sending A2A response with {len(a2a_response['result']['message']['parts'])} parts")
-            return JSONResponse(content=a2a_response)
-
-        # Simple format: {"message": "..." } OR {"message": {...}}
         else:
-            logger.debug("Detected simple message format")
+            # --- Simple JSON format ---
             message_obj = body.get("message") or body.get("text")
-
             if isinstance(message_obj, dict) and "parts" in message_obj:
                 message_text = latest_text(message_obj.get("parts"))
             else:
@@ -154,47 +191,40 @@ async def handle_webhook(request: Request):
             message_text = extract_last_directions(message_text)
 
             if not message_text:
-                return JSONResponse(
-                    content={
-                        "text": "❌ No message field found. Please send a 'message' field.",
-                        "success": False
-                    },
-                    status_code=400
+                resp = make_task_result(
+                    rid,
+                    content="❌ No message field found. Please send a 'message' field.",
+                    context_id=str(uuid.uuid4()),
+                    task_id=str(uuid.uuid4()),
+                    state="failed",
+                    user_echo=None
                 )
+                return JSONResponse(content=resp)
 
-            logger.info(f"Processing simple message sent to agent: '{message_text}'")
             response = await agent.process_message(message_text)
-
-            response_data = {"text": response.text, "success": True}
-            if response.attachments:
-                response_data["attachments"] = response.attachments
-            if response.quick_replies:
-                response_data["quick_replies"] = response.quick_replies
-            if response.metadata:
-                response_data["metadata"] = response.metadata
-
-            logger.debug("Sending simple response")
-            return JSONResponse(content=response_data)
+            resp = make_task_result(
+                rid,
+                content=response.text,
+                context_id=str(uuid.uuid4()),
+                task_id=str(uuid.uuid4()),
+                user_echo=message_text,
+                attachments=getattr(response, "attachments", None),
+                quick_replies=getattr(response, "quick_replies", None)
+            )
+            return JSONResponse(content=resp)
 
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-
-        is_a2a = isinstance(body, dict) and "jsonrpc" in body
-        if is_a2a:
-            return format_telex_error("Internal server error", data=str(e), id_value=body.get("id"))
-        else:
-            return JSONResponse(
-                content={
-                    "text": "⚠️ Sorry, I encountered an error. Please try again.",
-                    "error": str(e),
-                    "success": False
-                },
-                status_code=500
-            )
+        rid = body.get("id") if isinstance(body, dict) else str(uuid.uuid4())
+        resp = make_task_result(
+            rid,
+            content=f"⚠️ Internal server error: {str(e)}",
+            context_id=str(uuid.uuid4()),
+            task_id=str(uuid.uuid4()),
+            state="failed",
+            user_echo=None
+        )
+        return JSONResponse(content=resp)
 
 
 @router.get("/health")
@@ -210,9 +240,7 @@ async def health_check():
 
 @router.get("/manifest")
 async def manifest():
-    """
-    Manifest endpoint required by Telex to fetch your agent's metadata.
-    """
+    """Manifest endpoint required by Telex to fetch your agent's metadata."""
     return JSONResponse(
         content={
             "name": "MapRoute Agent",
