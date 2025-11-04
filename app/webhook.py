@@ -146,6 +146,10 @@ async def handle_webhook(request: Request):
     try:
         body = await request.json()
         logger.info("Received webhook request")
+
+        # --- log full incoming message for debugging ---
+        logger.debug(f"Full webhook payload: {body}")
+
         rid = body.get("id", str(uuid.uuid4()))
         message_text = ""
 
@@ -154,6 +158,10 @@ async def handle_webhook(request: Request):
             params = body.get("params", {})
             message_obj = params.get("message", {})
             parts = message_obj.get("parts", [])
+
+            # --- log message parts ---
+            logger.debug(f"A2A message parts: {parts}")
+
             message_text = latest_text(parts)
             message_text = extract_last_directions(message_text)
 
@@ -184,7 +192,9 @@ async def handle_webhook(request: Request):
             # --- Simple JSON format ---
             message_obj = body.get("message") or body.get("text")
             if isinstance(message_obj, dict) and "parts" in message_obj:
-                message_text = latest_text(message_obj.get("parts"))
+                parts = message_obj.get("parts")
+                logger.debug(f"Simple JSON message parts: {parts}")
+                message_text = latest_text(parts)
             else:
                 message_text = message_obj
 
